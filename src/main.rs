@@ -56,12 +56,12 @@ fn main() -> Result<(), Error> {
     Ok(())
 }
 
-/// A pre-processor for `{{#md_include}}` that acts like `{{#include}}` but allows shifting.
+/// A pre-processor for `{{#mdinclude}}` that acts like `{{#include}}` but updates relative links.
 #[derive(Default)]
 pub struct MdInclude;
 
 impl MdInclude {
-    const NAME: &'static str = "md_include";
+    const NAME: &'static str = "mdinclude";
 
     fn new(ctx: &PreprocessorContext) -> Self {
         if ctx.mdbook_version != mdbook::MDBOOK_VERSION {
@@ -331,7 +331,7 @@ impl<'a> Link<'a> {
                 let file_arg = path_props.next();
 
                 match (typ.as_str(), file_arg) {
-                    ("md_include", Some(pth)) => Some(parse_md_include_path(pth)),
+                    ("mdinclude", Some(pth)) => Some(parse_md_include_path(pth)),
                     _ => None,
                 }
             }
@@ -422,12 +422,12 @@ mod tests {
         let start = r"
         Some text over here.
         ```hbs
-        \{{#md_include 0:file.rs}} << an escaped link!
+        \{{#mdinclude 0:file.rs}} << an escaped link!
         ```";
         let end = r"
         Some text over here.
         ```hbs
-        {{#md_include 0:file.rs}} << an escaped link!
+        {{#mdinclude 0:file.rs}} << an escaped link!
         ```";
         assert_eq!(replace_all(start, "", "", 0), end);
     }
@@ -462,7 +462,7 @@ mod tests {
 
     #[test]
     fn test_find_links_with_range() {
-        let s = "Some random text with {{#md_include 0:file.rs:10:20}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs:10:20}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -474,14 +474,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(9..20)),
                 ),
-                link_text: "{{#md_include 0:file.rs:10:20}}",
+                link_text: "{{#mdinclude 0:file.rs:10:20}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_line_number() {
-        let s = "Some random text with {{#md_include 0:file.rs:10}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs:10}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -493,14 +493,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(9..10)),
                 ),
-                link_text: "{{#md_include 0:file.rs:10}}",
+                link_text: "{{#mdinclude 0:file.rs:10}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_from_range() {
-        let s = "Some random text with {{#md_include 0:file.rs:10:}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs:10:}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -512,14 +512,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(9..)),
                 ),
-                link_text: "{{#md_include 0:file.rs:10:}}",
+                link_text: "{{#mdinclude 0:file.rs:10:}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_to_range() {
-        let s = "Some random text with {{#md_include 0:file.rs::20}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs::20}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -531,14 +531,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(..20)),
                 ),
-                link_text: "{{#md_include 0:file.rs::20}}",
+                link_text: "{{#mdinclude 0:file.rs::20}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_full_range() {
-        let s = "Some random text with {{#md_include 0:file.rs::}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs::}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -550,14 +550,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(..)),
                 ),
-                link_text: "{{#md_include 0:file.rs::}}",
+                link_text: "{{#mdinclude 0:file.rs::}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_no_range_specified() {
-        let s = "Some random text with {{#md_include 0:file.rs}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -569,14 +569,14 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Range(LineRange::from(..)),
                 ),
-                link_text: "{{#md_include 0:file.rs}}",
+                link_text: "{{#mdinclude 0:file.rs}}",
             }]
         );
     }
 
     #[test]
     fn test_find_links_with_anchor() {
-        let s = "Some random text with {{#md_include 0:file.rs:anchor}}...";
+        let s = "Some random text with {{#mdinclude 0:file.rs:anchor}}...";
         let res = find_links(s).collect::<Vec<_>>();
         println!("\nOUTPUT: {:?}\n", res);
         assert_eq!(
@@ -588,7 +588,7 @@ mod tests {
                     PathBuf::from("file.rs"),
                     RangeOrAnchor::Anchor(String::from("anchor")),
                 ),
-                link_text: "{{#md_include 0:file.rs:anchor}}",
+                link_text: "{{#mdinclude 0:file.rs:anchor}}",
             }]
         );
     }
