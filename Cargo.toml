@@ -1,9 +1,12 @@
 [package]
 name = "mdbook-mdinclude"
+description = "Preprocessor for mdBook that better handles including markdown files."
 version = "0.1.0"
 edition = "2021"
+repository = "https://github.com/shawntabrizi/mdbook-mdinclude"
+license = "MIT"
 keywords = ["mdbook", "preprocessor"]
-categories = ["text-processing"]
+categories = []
 
 [dependencies]
 anyhow = "1.0.71"
