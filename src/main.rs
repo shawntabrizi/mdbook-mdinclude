@@ -1,6 +1,6 @@
-//! mdBook preprocessor for file inclusion with shift
+//! An mdBook preprocessor for better markdown file inclusion.
 //!
-//! Based on the links preprocessor in the main mdBook project.
+//! Based on the links preprocessor in the main mdBook project and shiftinclude.
 
 use anyhow::Context;
 use clap::{App, Arg, SubCommand};
@@ -27,7 +27,7 @@ const MAX_LINK_NESTED_DEPTH: usize = 10;
 fn main() -> Result<(), Error> {
     env_logger::init();
     let app = App::new(MdInclude::NAME)
-        .about("An mdbook preprocessor which includes files with shift")
+        .about("An mdBook preprocessor for better markdown file inclusion.")
         .subcommand(
             SubCommand::with_name("supports")
                 .arg(Arg::with_name("renderer").required(true))
