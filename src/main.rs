@@ -187,16 +187,12 @@ fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> St
             caps.get(4).map_or("", |m| m.as_str())
         };
 
-        eprintln!("old link: {}", relative_link);
-
         // Create a PathBuf from the relative_folder and the relative link
         let mut new_path = PathBuf::from(relative_folder);
         new_path.push(Path::new(relative_link));
 
         // Normalize the path to remove redundant components (like `./`)
         let updated_link = new_path.display().to_string().replace("\\", "/"); // Ensure Unix-style path separators
-
-        eprintln!("updated link: {}", updated_link);
 
         // Determine the replacement based on the match
         if let Some(alt_text) = caps.get(1) {
