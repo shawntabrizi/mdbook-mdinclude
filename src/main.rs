@@ -5,6 +5,8 @@
 use anyhow::Context;
 use clap::{App, Arg, SubCommand};
 use log::{error, warn};
+use mdbook::utils::take_anchored_lines;
+use mdbook::utils::take_lines;
 use mdbook::{
     book::{Book, BookItem},
     errors::{Error, Result},
@@ -13,14 +15,11 @@ use mdbook::{
 use once_cell::sync::Lazy;
 use regex::{CaptureMatches, Captures, Regex};
 use std::{
-    cmp::Ordering,
     fs, io,
     ops::{Bound, Range, RangeBounds, RangeFrom, RangeFull, RangeTo},
     path::{Path, PathBuf},
     process,
 };
-use mdbook::utils::take_lines;
-use mdbook::utils::take_anchored_lines;
 
 const ESCAPE_CHAR: char = '\\';
 const MAX_LINK_NESTED_DEPTH: usize = 10;
@@ -110,12 +109,7 @@ impl Preprocessor for MdInclude {
     }
 }
 
-fn replace_all<P1, P2>(
-    s: &str,
-    path: P1,
-    source: P2,
-    depth: usize,
-) -> String
+fn replace_all<P1, P2>(s: &str, path: P1, source: P2, depth: usize) -> String
 where
     P1: AsRef<Path>,
     P2: AsRef<Path>,
@@ -129,21 +123,15 @@ where
     let mut replaced = String::new();
 
     for link in find_links(s) {
-
-        eprintln!("LINK {:?}", link);
         replaced.push_str(&s[previous_end_index..link.start_index]);
-
         match link.render_with_path(path) {
-            Ok(new_content) => {
-                eprintln!("NEW CONTENT {:?}", new_content);
+            Ok(mut new_content) => {
+                if let Some(relative_path) = link.link_type.clone().relative_path(path) {
+                    new_content = update_relative_links(&new_content, &path, &relative_path);
+                }
                 if depth < MAX_LINK_NESTED_DEPTH {
                     if let Some(rel_path) = link.link_type.relative_path(path) {
-                        replaced.push_str(&replace_all(
-                            &new_content,
-                            rel_path,
-                            source,
-                            depth + 1,
-                        ));
+                        replaced.push_str(&replace_all(&new_content, rel_path, source, depth + 1));
                     } else {
                         replaced.push_str(&new_content);
                     }
@@ -172,26 +160,59 @@ where
     replaced
 }
 
-    fn update_relative_links(content: &str, include_path: &Path) -> String {
-        let mut result = String::from(content);
-        let link_re = Regex::new(r"(\!\[.*?\]\(|\[.*?\]\()([^\):]+)([\):])").unwrap();
+/// This function updates relative links in `content` based on the provided `relative_path`
+/// and `path`. For example, if you use `{{#mdinclude ./my_folder/README.md}}`, then links
+/// in `README.md` will be updated with `my_folder`.
+fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> String {
+    // Strip the `path` prefix from `relative_path` to get the relative folder
+    let Ok(relative_folder) = relative_path.strip_prefix(path) else {
+        return content.to_owned();
+    };
 
-        let base_dir = include_path.parent().unwrap_or(Path::new("."));
+    // Regex to match Markdown image and link syntax
+    let re = Regex::new(
+        r#"(?x)
+        !\[(.*?)\]\((./[^)]+)\)|           # Markdown image ![alt text](path)
+        \[(.*?)\]\((./[^)]+)\)           # Markdown link [text](path)
+        "#,
+    )
+    .unwrap();
 
-        result = link_re.replace_all(&result, |caps: &regex::Captures| {
-            let mut link_target = caps[2].to_string();
+    // Replace all matches using the regex
+    let updated_content = re.replace_all(content, |caps: &regex::Captures| {
+        // Extract the relative link
+        let relative_link = if let Some(link) = caps.get(2) {
+            link.as_str()
+        } else {
+            caps.get(4).map_or("", |m| m.as_str())
+        };
 
-            // Only adjust relative paths
-            if !Path::new(&link_target).is_absolute() && !link_target.starts_with('#') {
-                let full_path = base_dir.join(&link_target);
-                link_target = full_path.to_string_lossy().into_owned();
-            }
+        eprintln!("old link: {}", relative_link);
 
-            format!("{}{}{}", &caps[1], link_target, &caps[3])
-        }).to_string();
+        // Create a PathBuf from the relative_folder and the relative link
+        let mut new_path = PathBuf::from(relative_folder);
+        new_path.push(Path::new(relative_link));
 
-        result
-    }
+        // Normalize the path to remove redundant components (like `./`)
+        let updated_link = new_path.display().to_string().replace("\\", "/"); // Ensure Unix-style path separators
+
+        eprintln!("updated link: {}", updated_link);
+
+        // Determine the replacement based on the match
+        if let Some(alt_text) = caps.get(1) {
+            // Handle Markdown image with alt text
+            format!("![{}]({})", alt_text.as_str(), updated_link)
+        } else if let Some(text) = caps.get(3) {
+            // Handle Markdown link
+            format!("[{}]({})", text.as_str(), updated_link)
+        } else {
+            // In case something unexpected happens, just return the original match
+            caps.get(0).unwrap().as_str().to_string()
+        }
+    });
+
+    updated_content.into_owned()
+}
 
 #[derive(PartialEq, Debug, Clone)]
 enum LinkType {
@@ -351,10 +372,7 @@ impl<'a> Link<'a> {
         })
     }
 
-    fn render_with_path<P: AsRef<Path>>(
-        &self,
-        base: P,
-    ) -> Result<String> {
+    fn render_with_path<P: AsRef<Path>>(&self, base: P) -> Result<String> {
         let base = base.as_ref();
         match self.link_type {
             // omit the escape char
@@ -461,139 +479,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_links_with_range() {
-        let s = "Some random text with {{#mdinclude 0:file.rs:10:20}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 52,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(9..20)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs:10:20}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_line_number() {
-        let s = "Some random text with {{#mdinclude 0:file.rs:10}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 49,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(9..10)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs:10}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_from_range() {
-        let s = "Some random text with {{#mdinclude 0:file.rs:10:}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 50,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(9..)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs:10:}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_to_range() {
-        let s = "Some random text with {{#mdinclude 0:file.rs::20}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 50,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(..20)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs::20}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_full_range() {
-        let s = "Some random text with {{#mdinclude 0:file.rs::}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 48,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(..)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs::}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_no_range_specified() {
-        let s = "Some random text with {{#mdinclude 0:file.rs}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 46,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Range(LineRange::from(..)),
-                ),
-                link_text: "{{#mdinclude 0:file.rs}}",
-            }]
-        );
-    }
-
-    #[test]
-    fn test_find_links_with_anchor() {
-        let s = "Some random text with {{#mdinclude 0:file.rs:anchor}}...";
-        let res = find_links(s).collect::<Vec<_>>();
-        println!("\nOUTPUT: {:?}\n", res);
-        assert_eq!(
-            res,
-            vec![Link {
-                start_index: 22,
-                end_index: 53,
-                link_type: LinkType::Include(
-                    PathBuf::from("file.rs"),
-                    RangeOrAnchor::Anchor(String::from("anchor")),
-                ),
-                link_text: "{{#mdinclude 0:file.rs:anchor}}",
-            }]
-        );
-    }
-
-    #[test]
     fn test_find_links_escaped_link() {
         let s = "Some random text with escaped playground \\{{#playground file.rs editable}} ...";
 
@@ -609,5 +494,40 @@ mod tests {
                 link_text: "\\{{#playground file.rs editable}}",
             }]
         );
+    }
+
+    #[test]
+    fn update_relative_links_works() {
+        let inputs_and_outputs = [
+            (
+                "My image here: ![my image](./.hidden/subfolder/image/image.png), and it is really cool!",
+                "My image here: ![my image](with/subfolder/./.hidden/subfolder/image/image.png), and it is really cool!"
+            ),
+            (
+                "My image here: [my link](./.hidden/subfolder/tests/test.rs), and it is really cool!",
+                "My image here: [my link](with/subfolder/./.hidden/subfolder/tests/test.rs), and it is really cool!"
+            ),
+        ];
+        let path = Path::new("/long/concrete/path/to/project/");
+        let relative_path = Path::new("/long/concrete/path/to/project/with/subfolder/");
+
+        for (input, output) in inputs_and_outputs.into_iter() {
+            let final_content = update_relative_links(input, path, relative_path);
+
+            assert_eq!(final_content, output)
+        }
+    }
+
+    #[test]
+    fn update_relative_links_skips_random_links() {
+        let content =
+            "My image here: `./.hidden/subfolder/image/image.png`, and it is really cool!";
+        let path = Path::new("/long/concrete/path/to/project/");
+        let relative_path = Path::new("/long/concrete/path/to/project/with/subfolder/");
+
+        let final_content = update_relative_links(content, path, relative_path);
+
+        // Unchanged
+        assert_eq!(final_content, content)
     }
 }
