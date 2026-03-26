@@ -129,6 +129,15 @@ where
                     new_content = update_relative_links(&new_content, path, rp);
                 }
 
+                // Build the full content preceding this link (already-replaced
+                // text + the slice of the original between the last replacement
+                // and this link) so we can find the nearest parent heading.
+                let context_before =
+                    format!("{}{}", &replaced, &s[previous_end_index..link.start_index]);
+                if let Some(parent_level) = find_parent_heading_level(&context_before) {
+                    new_content = adjust_heading_levels(&new_content, parent_level);
+                }
+
                 if depth < MAX_LINK_NESTED_DEPTH {
                     if let Some(rp) = rel_path {
                         replaced.push_str(&replace_all(&new_content, rp, source, depth + 1));
@@ -209,6 +218,101 @@ fn normalize_path(path: &Path) -> PathBuf {
         }
     }
     components.iter().collect()
+}
+
+/// Returns the heading level (1-6) of a line, or `None` if it's not a heading.
+/// Only recognizes ATX-style headings (`# ...` through `###### ...`).
+fn heading_level(line: &str) -> Option<usize> {
+    let trimmed = line.trim_start();
+    if !trimmed.starts_with('#') {
+        return None;
+    }
+    let level = trimmed.bytes().take_while(|&b| b == b'#').count();
+    if level <= 6 && trimmed.len() > level && trimmed.as_bytes()[level] == b' ' {
+        Some(level)
+    } else {
+        None
+    }
+}
+
+/// Find the heading level of the nearest heading before `position` in `content`,
+/// skipping headings inside fenced code blocks.
+fn find_parent_heading_level(content: &str) -> Option<usize> {
+    let mut last_heading_level = None;
+    let mut in_code_block = false;
+
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_block = !in_code_block;
+        }
+        if !in_code_block {
+            if let Some(level) = heading_level(line) {
+                last_heading_level = Some(level);
+            }
+        }
+    }
+
+    last_heading_level
+}
+
+/// Adjust heading levels in `content` so they nest under `parent_level`.
+///
+/// For example, if `parent_level` is 2 (`##`) and the included content has
+/// `## Foo` and `### Bar`, they become `### Foo` and `#### Bar`.
+fn adjust_heading_levels(content: &str, parent_level: usize) -> String {
+    // Find the minimum heading level, skipping code blocks.
+    let mut min_level: Option<usize> = None;
+    let mut in_code_block = false;
+    for line in content.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_block = !in_code_block;
+        }
+        if !in_code_block {
+            if let Some(level) = heading_level(line) {
+                min_level = Some(min_level.map_or(level, |m: usize| m.min(level)));
+            }
+        }
+    }
+
+    let Some(min_level) = min_level else {
+        return content.to_owned();
+    };
+
+    // Offset so that the shallowest included heading becomes parent_level + 1.
+    let offset = (parent_level + 1) as isize - min_level as isize;
+    if offset == 0 {
+        return content.to_owned();
+    }
+
+    let mut out = String::with_capacity(content.len() + 32);
+    let mut in_code_block = false;
+    let mut first = true;
+    for line in content.lines() {
+        if !first {
+            out.push('\n');
+        }
+        first = false;
+
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_code_block = !in_code_block;
+        }
+        if !in_code_block {
+            if let Some(level) = heading_level(line) {
+                let new_level = ((level as isize + offset).max(1) as usize).min(6);
+                out.push_str(&"#".repeat(new_level));
+                out.push_str(&line[level..]);
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    if content.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -532,5 +636,74 @@ mod tests {
             normalize_path(Path::new("a/b/./c/../d")),
             PathBuf::from("a/b/d")
         );
+    }
+
+    #[test]
+    fn test_heading_level() {
+        assert_eq!(heading_level("# Title"), Some(1));
+        assert_eq!(heading_level("## Section"), Some(2));
+        assert_eq!(heading_level("###### Deep"), Some(6));
+        assert_eq!(heading_level("####### Too deep"), None);
+        assert_eq!(heading_level("#NoSpace"), None);
+        assert_eq!(heading_level("Not a heading"), None);
+        assert_eq!(heading_level("  ## Indented"), Some(2));
+    }
+
+    #[test]
+    fn test_find_parent_heading_level() {
+        assert_eq!(find_parent_heading_level("# Title\n\nSome text\n"), Some(1));
+        assert_eq!(find_parent_heading_level("# Title\n## Section\n"), Some(2));
+        assert_eq!(find_parent_heading_level("No headings here\n"), None);
+        // Headings in code blocks should be ignored
+        assert_eq!(
+            find_parent_heading_level("# Real\n```\n## Fake\n```\n"),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_basic() {
+        let content = "## Section\n\nSome text\n\n### Sub\n";
+        let result = adjust_heading_levels(content, 2);
+        assert_eq!(result, "### Section\n\nSome text\n\n#### Sub\n");
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_no_headings() {
+        let content = "Just some text\nNo headings here\n";
+        assert_eq!(adjust_heading_levels(content, 2), content);
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_already_correct() {
+        // Parent is h1, content starts at h2 — already correct, no adjustment
+        let content = "## Already correct\n### Sub\n";
+        assert_eq!(adjust_heading_levels(content, 1), content);
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_skips_code_blocks() {
+        let content = "## Real heading\n\n```\n## Fake heading\n```\n";
+        let result = adjust_heading_levels(content, 2);
+        // Real heading should be adjusted, fake should not
+        assert!(result.contains("### Real heading"));
+        assert!(result.contains("## Fake heading"));
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_clamps_to_h6() {
+        let content = "###### Deep\n";
+        let result = adjust_heading_levels(content, 5);
+        // Would want h7 but should clamp to h6
+        assert!(result.starts_with("######"));
+    }
+
+    #[test]
+    fn test_adjust_heading_levels_negative_offset() {
+        // Parent is h1, included content has h4 and h5
+        // Should become h2 and h3
+        let content = "#### Deep\n##### Deeper\n";
+        let result = adjust_heading_levels(content, 1);
+        assert_eq!(result, "## Deep\n### Deeper\n");
     }
 }

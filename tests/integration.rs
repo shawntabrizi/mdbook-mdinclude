@@ -288,3 +288,85 @@ fn mixed_links_in_included_file() {
     );
     assert!(content.contains("[fragment](#section)"), "got: {content}");
 }
+
+#[test]
+fn heading_level_adjustment() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("install.md"),
+        "Here are the instructions:\n\n## MacOS\n\nTo install on mac...\n\n## Linux\n\nTo install on linux...\n",
+    )
+    .unwrap();
+
+    let ch = Chapter::new(
+        "Test",
+        "# My Project\n\nMy project is cool.\n\n## Installation\n\n{{#mdinclude install.md}}"
+            .to_string(),
+        "chapter.md",
+        vec![],
+    );
+
+    let book = run_preprocessor(tmp.path(), vec![ch]);
+    let content = get_chapter_content(&book, 0);
+    // ## MacOS should become ### MacOS (nested under ## Installation)
+    assert!(
+        content.contains("### MacOS"),
+        "Expected ### MacOS, got: {content}"
+    );
+    assert!(
+        content.contains("### Linux"),
+        "Expected ### Linux, got: {content}"
+    );
+    // Should NOT contain the original ## level (check at line boundary)
+    assert!(
+        !content.contains("\n## MacOS"),
+        "Should not have ## MacOS as a heading, got: {content}"
+    );
+}
+
+#[test]
+fn heading_adjustment_preserves_hierarchy() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("nested.md"), "## Top\n\n### Sub\n\n#### Deep\n").unwrap();
+
+    let ch = Chapter::new(
+        "Test",
+        "### Context\n\n{{#mdinclude nested.md}}".to_string(),
+        "chapter.md",
+        vec![],
+    );
+
+    let book = run_preprocessor(tmp.path(), vec![ch]);
+    let content = get_chapter_content(&book, 0);
+    // h2 -> h4, h3 -> h5, h4 -> h6 (parent is h3, offset = 4-2 = +2)
+    assert!(content.contains("#### Top"), "got: {content}");
+    assert!(content.contains("##### Sub"), "got: {content}");
+    assert!(content.contains("###### Deep"), "got: {content}");
+}
+
+#[test]
+fn no_heading_adjustment_without_parent() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("intro.md"), "# Welcome\n\nHello!\n").unwrap();
+
+    let ch = Chapter::new(
+        "Test",
+        "{{#mdinclude intro.md}}".to_string(),
+        "chapter.md",
+        vec![],
+    );
+
+    let book = run_preprocessor(tmp.path(), vec![ch]);
+    let content = get_chapter_content(&book, 0);
+    // No parent heading, so # Welcome should stay as-is
+    assert!(
+        content.contains("# Welcome"),
+        "Should keep original heading level, got: {content}"
+    );
+}

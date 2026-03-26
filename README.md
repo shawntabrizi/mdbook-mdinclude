@@ -51,6 +51,60 @@ Check out this cool image:
 
 The link is updated to the correct path relative to the including file.
 
+### Update Header Level
+
+When including an external markdown file, heading levels are automatically adjusted to nest under the heading where the include is placed. This preserves the document hierarchy without requiring you to manually edit the included file.
+
+For example, imagine you have the following folder structure:
+
+```text
+my_project/
+├─ README.md
+├─ install.md
+```
+
+In `README.md` you have:
+
+```md
+# My Cool Project
+
+My project is really cool.
+
+## Installation Instructions
+
+{{#mdinclude ./install.md}}
+```
+
+In `install.md` you have:
+
+```md
+Here are the instructions to install this project:
+
+## MacOS
+
+To install this on mac...
+```
+
+The final output will be:
+
+```md
+# My Cool Project
+
+My project is really cool.
+
+## Installation Instructions
+
+Here are the instructions to install this project:
+
+### MacOS
+
+To install this on mac...
+```
+
+The `## MacOS` heading becomes `### MacOS` because it is nested under the `##` heading where the include was placed. All heading levels in the included file are shifted by the same amount, preserving the relative hierarchy.
+
+If there is no heading before the include directive, headings are left unchanged.
+
 ## Installation & Setup
 
 This preprocessor can be installed with Cargo:
