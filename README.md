@@ -28,7 +28,7 @@ In `README.md`, you write the following:
 ```md
 Here is the content of `include_me.md`:
 
-{{#mdinclude ./content/include_me.md}}
+{{#mdinclude content/include_me.md}}
 ```
 
 In `include_me.md` you have the following:
@@ -36,7 +36,7 @@ In `include_me.md` you have the following:
 ```md
 Check out this cool image:
 
-![my image](./images/image.png)
+![my image](images/image.png)
 ```
 
 So the final rendered `README.md` page will be:
@@ -72,7 +72,7 @@ My project is really cool.
 
 ## Installation Instructions
 
-{{#mdinclude ./install.md}}
+{{#mdinclude install.md}}
 ```
 
 In `install.md` you have:
