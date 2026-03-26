@@ -15,7 +15,7 @@ use mdbook::{
 use regex::{CaptureMatches, Captures, Regex};
 use std::{
     fs,
-    ops::{Bound, RangeBounds},
+    ops::{Bound, Range, RangeBounds},
     path::{Path, PathBuf},
     sync::LazyLock,
 };
@@ -55,9 +55,9 @@ static MARKDOWN_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Returns true if `link` is a relative path (not an absolute URL, absolute
-/// path, or fragment reference).
+/// path, fragment reference, or URI scheme like `mailto:`, `tel:`, `data:`, etc.).
 fn is_relative_link(link: &str) -> bool {
-    !link.starts_with('/') && !link.starts_with('#') && !link.contains("://")
+    !link.starts_with('/') && !link.starts_with('#') && !link.contains(':')
 }
 
 /// A preprocessor for `{{#mdinclude}}` that acts like `{{#include}}` but updates relative links.
@@ -222,29 +222,91 @@ fn strip_frontmatter(content: &str) -> String {
     content.to_owned()
 }
 
+/// Find byte ranges in `content` that are inside fenced code blocks or inline
+/// code spans. Matches inside these ranges should not be rewritten.
+fn find_code_ranges(content: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+
+    // Pass 1: fenced code blocks.
+    let mut in_code_block = false;
+    let mut block_start = 0;
+    let mut offset = 0;
+    for line in content.split('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            if in_code_block {
+                ranges.push(block_start..offset + line.len());
+                in_code_block = false;
+            } else {
+                block_start = offset;
+                in_code_block = true;
+            }
+        }
+        offset += line.len() + 1; // +1 for \n
+    }
+    if in_code_block {
+        ranges.push(block_start..content.len());
+    }
+
+    // Pass 2: inline code spans (outside fenced blocks).
+    let bytes = content.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'`' && !ranges.iter().any(|r| r.contains(&i)) {
+            let start = i;
+            let mut count = 0;
+            while i < bytes.len() && bytes[i] == b'`' {
+                count += 1;
+                i += 1;
+            }
+            let closing = "`".repeat(count);
+            if let Some(pos) = content[i..].find(&closing) {
+                let end = i + pos + count;
+                ranges.push(start..end);
+                i = end;
+            }
+        } else {
+            i += 1;
+        }
+    }
+
+    ranges
+}
+
 /// Updates relative links in `content` to account for the included file's location.
 ///
 /// For example, if a file at `content/README.md` is included into a chapter at
 /// the book root, a link like `![img](./images/photo.png)` becomes
 /// `![img](content/images/photo.png)`.
+///
+/// Links inside fenced code blocks and inline code spans are left unchanged.
 fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> String {
     let Ok(relative_folder) = relative_path.strip_prefix(path) else {
         return content.to_owned();
     };
 
+    let code_ranges = find_code_ranges(content);
+
     MARKDOWN_LINK_RE
         .replace_all(content, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+
+            // Skip matches inside code blocks or inline code.
+            if code_ranges.iter().any(|r| r.contains(&m.start())) {
+                return m.as_str().to_string();
+            }
+
             let (is_image, alt_or_text, link) =
                 if let (Some(alt), Some(link)) = (caps.get(1), caps.get(2)) {
                     (true, alt.as_str(), link.as_str())
                 } else if let (Some(text), Some(link)) = (caps.get(3), caps.get(4)) {
                     (false, text.as_str(), link.as_str())
                 } else {
-                    return caps.get(0).unwrap().as_str().to_string();
+                    return m.as_str().to_string();
                 };
 
             if !is_relative_link(link) {
-                return caps.get(0).unwrap().as_str().to_string();
+                return m.as_str().to_string();
             }
 
             let new_path = normalize_path(&relative_folder.join(link));
@@ -267,7 +329,11 @@ fn normalize_path(path: &Path) -> PathBuf {
         match component {
             Component::CurDir => {}
             Component::ParentDir => {
-                components.pop();
+                if matches!(components.last(), Some(Component::Normal(_))) {
+                    components.pop();
+                } else {
+                    components.push(component);
+                }
             }
             other => components.push(other),
         }
@@ -358,7 +424,7 @@ fn adjust_heading_levels(content: &str, parent_level: usize) -> String {
             if let Some(level) = heading_level(line) {
                 let new_level = ((level as isize + offset).max(1) as usize).min(6);
                 out.push_str(&"#".repeat(new_level));
-                out.push_str(&line[level..]);
+                out.push_str(&trimmed[level..]);
                 continue;
             }
         }
@@ -798,5 +864,75 @@ mod tests {
     fn test_strip_frontmatter_empty_frontmatter() {
         let content = "---\n---\n\nContent\n";
         assert_eq!(strip_frontmatter(content), "Content\n");
+    }
+
+    // --- Regression tests for audit findings ---
+
+    #[test]
+    fn normalize_path_preserves_leading_parent_dir() {
+        // P1: leading .. must not be dropped
+        assert_eq!(
+            normalize_path(Path::new("../shared/img.png")),
+            PathBuf::from("../shared/img.png")
+        );
+        assert_eq!(
+            normalize_path(Path::new("../../other/file.md")),
+            PathBuf::from("../../other/file.md")
+        );
+        // .. after a normal component still resolves
+        assert_eq!(normalize_path(Path::new("a/../b")), PathBuf::from("b"));
+    }
+
+    #[test]
+    fn update_relative_links_skips_fenced_code_blocks() {
+        // P1: links inside fenced code blocks should not be rewritten
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "```md\n![image](images/photo.png)\n```\n";
+        assert_eq!(update_relative_links(input, path, relative_path), input);
+    }
+
+    #[test]
+    fn update_relative_links_skips_inline_code() {
+        // P1: links inside inline code should not be rewritten
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "Use `[link](images/photo.png)` syntax.";
+        assert_eq!(update_relative_links(input, path, relative_path), input);
+    }
+
+    #[test]
+    fn update_relative_links_rewrites_outside_code() {
+        // Links outside code should still be rewritten
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "```\n[skip](a.md)\n```\n\n[rewrite](b.md)\n";
+        let result = update_relative_links(input, path, relative_path);
+        assert!(result.contains("[skip](a.md)"), "got: {result}");
+        assert!(result.contains("[rewrite](content/b.md)"), "got: {result}");
+    }
+
+    #[test]
+    fn adjust_heading_levels_indented_heading() {
+        // P2: indented headings should not be corrupted
+        let content = "  ## Indented Title\n";
+        let result = adjust_heading_levels(content, 2);
+        assert_eq!(result, "### Indented Title\n");
+    }
+
+    #[test]
+    fn is_relative_link_rejects_non_http_schemes() {
+        // P2: mailto, tel, data, file should not be treated as relative
+        assert!(!is_relative_link("mailto:user@example.com"));
+        assert!(!is_relative_link("tel:+1234567890"));
+        assert!(!is_relative_link("data:text/plain;base64,abc"));
+        assert!(!is_relative_link("file:///path/to/file"));
+        // Relative paths should still pass
+        assert!(is_relative_link("images/photo.png"));
+        assert!(is_relative_link("./images/photo.png"));
+        assert!(is_relative_link("../images/photo.png"));
     }
 }
