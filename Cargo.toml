@@ -6,8 +6,9 @@ edition = "2021"
 rust-version = "1.80"
 repository = "https://github.com/shawntabrizi/mdbook-mdinclude"
 license = "MIT"
-keywords = ["mdbook", "preprocessor"]
-categories = []
+keywords = ["mdbook", "preprocessor", "markdown", "include"]
+categories = ["command-line-utilities", "text-processing"]
+exclude = [".github/"]
 
 [dependencies]
 anyhow = "1"
@@ -19,5 +20,4 @@ regex = "1"
 serde_json = "1"
 
 [dev-dependencies]
-serde_json = "1"
 tempfile = "3"
