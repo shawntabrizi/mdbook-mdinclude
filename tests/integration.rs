@@ -370,3 +370,59 @@ fn no_heading_adjustment_without_parent() {
         "Should keep original heading level, got: {content}"
     );
 }
+
+#[test]
+fn frontmatter_stripped() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("with_frontmatter.md"),
+        "---\ntitle: My Crate\ndescription: Something\n---\n\n# My Crate\n\nActual content.\n",
+    )
+    .unwrap();
+
+    let ch = Chapter::new(
+        "Test",
+        "{{#mdinclude with_frontmatter.md}}".to_string(),
+        "chapter.md",
+        vec![],
+    );
+
+    let book = run_preprocessor(tmp.path(), vec![ch]);
+    let content = get_chapter_content(&book, 0);
+    assert!(
+        !content.contains("title: My Crate"),
+        "Frontmatter should be stripped, got: {content}"
+    );
+    assert!(
+        content.contains("# My Crate"),
+        "Content after frontmatter should remain, got: {content}"
+    );
+    assert!(
+        content.contains("Actual content."),
+        "Body content should remain, got: {content}"
+    );
+}
+
+#[test]
+fn no_frontmatter_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("plain.md"), "# No Frontmatter\n\nJust text.\n").unwrap();
+
+    let ch = Chapter::new(
+        "Test",
+        "{{#mdinclude plain.md}}".to_string(),
+        "chapter.md",
+        vec![],
+    );
+
+    let book = run_preprocessor(tmp.path(), vec![ch]);
+    let content = get_chapter_content(&book, 0);
+    assert!(
+        content.contains("# No Frontmatter"),
+        "Content should be unchanged, got: {content}"
+    );
+}

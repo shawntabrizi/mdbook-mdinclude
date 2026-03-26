@@ -105,6 +105,23 @@ The `## MacOS` heading becomes `### MacOS` because it is nested under the `##` h
 
 If there is no heading before the include directive, headings are left unchanged.
 
+### Strip Frontmatter
+
+Many markdown files (especially README files from other projects) start with YAML frontmatter:
+
+```md
+---
+title: My Crate
+description: Something cool
+---
+
+# My Crate
+
+Actual content here.
+```
+
+When included with `{{#mdinclude}}`, the frontmatter block is automatically stripped. Only the content after the closing `---` is included. If there is no frontmatter, the file is included as-is.
+
 ## Installation & Setup
 
 This preprocessor can be installed with Cargo:

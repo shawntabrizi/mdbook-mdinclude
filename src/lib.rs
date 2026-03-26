@@ -123,6 +123,8 @@ where
         replaced.push_str(&s[previous_end_index..link.start_index]);
         match link.render_with_path(path) {
             Ok(mut new_content) => {
+                new_content = strip_frontmatter(&new_content);
+
                 let rel_path = link.link_type.relative_path(path);
 
                 if let Some(ref rp) = rel_path {
@@ -165,6 +167,59 @@ where
 
     replaced.push_str(&s[previous_end_index..]);
     replaced
+}
+
+/// Strip YAML frontmatter from the beginning of content.
+///
+/// Frontmatter is a block delimited by `---` on its own line at the very start
+/// of the content. For example:
+///
+/// ```text
+/// ---
+/// title: My Page
+/// ---
+///
+/// Actual content here.
+/// ```
+///
+/// Returns the content after the closing `---` (with leading whitespace trimmed).
+/// If there is no frontmatter, the content is returned unchanged.
+fn strip_frontmatter(content: &str) -> String {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return content.to_owned();
+    }
+
+    // Find the closing `---` after the opening one.
+    let after_opening = &trimmed[3..];
+    // The opening `---` must be followed by a newline.
+    let rest = if let Some(r) = after_opening.strip_prefix('\n') {
+        r
+    } else if let Some(r) = after_opening.strip_prefix("\r\n") {
+        r
+    } else {
+        return content.to_owned();
+    };
+
+    // Search for closing `---` on its own line.
+    for (i, line) in rest.lines().enumerate() {
+        if line.trim() == "---" {
+            // Find the byte offset past the closing `---\n`.
+            let consumed: usize = rest.lines().take(i + 1).map(|l| l.len() + 1).sum();
+            let remaining = &rest[consumed.min(rest.len())..];
+            // Trim one leading newline if present, but preserve the rest.
+            return if let Some(r) = remaining.strip_prefix('\n') {
+                r.to_owned()
+            } else if let Some(r) = remaining.strip_prefix("\r\n") {
+                r.to_owned()
+            } else {
+                remaining.to_owned()
+            };
+        }
+    }
+
+    // No closing `---` found — not valid frontmatter, return unchanged.
+    content.to_owned()
 }
 
 /// Updates relative links in `content` to account for the included file's location.
@@ -705,5 +760,43 @@ mod tests {
         let content = "#### Deep\n##### Deeper\n";
         let result = adjust_heading_levels(content, 1);
         assert_eq!(result, "## Deep\n### Deeper\n");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_basic() {
+        let content = "---\ntitle: Test\n---\n\nActual content\n";
+        assert_eq!(strip_frontmatter(content), "Actual content\n");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_multiline() {
+        let content = "---\ntitle: Test\ndescription: Stuff\ntags:\n  - a\n  - b\n---\n\n# Hello\n";
+        assert_eq!(strip_frontmatter(content), "# Hello\n");
+    }
+
+    #[test]
+    fn test_strip_frontmatter_no_frontmatter() {
+        let content = "# Just a heading\n\nSome text\n";
+        assert_eq!(strip_frontmatter(content), content);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_unclosed() {
+        // Opening --- but no closing --- is not valid frontmatter
+        let content = "---\ntitle: Test\nno closing\n";
+        assert_eq!(strip_frontmatter(content), content);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_not_at_start() {
+        // --- not at start of file is not frontmatter
+        let content = "Some text\n---\ntitle: Test\n---\n";
+        assert_eq!(strip_frontmatter(content), content);
+    }
+
+    #[test]
+    fn test_strip_frontmatter_empty_frontmatter() {
+        let content = "---\n---\n\nContent\n";
+        assert_eq!(strip_frontmatter(content), "Content\n");
     }
 }
