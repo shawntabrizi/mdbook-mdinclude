@@ -1,8 +1,14 @@
 //! An mdBook preprocessor for better markdown file inclusion.
 //!
-//! Provides `{{#mdinclude}}` which works like `{{#include}}` but automatically
-//! rewrites relative links in the included content so they resolve correctly
-//! from the including file's location.
+//! Provides `{{#mdinclude}}` which works like `{{#include}}` but automatically:
+//!
+//! - **Rewrites relative links** so they resolve correctly from the including
+//!   file's location (inline links, images, titled links, angle-bracket
+//!   destinations, and reference-style definitions).
+//! - **Adjusts heading levels** so included headings nest under the nearest
+//!   parent heading at the include site.
+//! - **Strips YAML frontmatter** (`---` delimited blocks at the start of the
+//!   included file).
 
 use anyhow::Context;
 use log::{error, warn};
