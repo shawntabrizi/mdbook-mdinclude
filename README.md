@@ -8,7 +8,9 @@ This `mdinclude` plugin will perform additional preprocessor steps for markdown 
 
 ### Update Relative Links
 
-This can be important if your markdown file includes some images/links that you want to continue to work after you have included the markdown file. This is a problem when using the default `{{#include }}` links.
+When you include a markdown file from a subdirectory, any relative links (images, links) in that file are automatically rewritten so they resolve correctly from the including file's location.
+
+This handles `./` paths, `../` paths, and bare relative paths like `images/photo.png`. Absolute URLs (`https://...`), absolute paths (`/...`), and fragment links (`#...`) are left untouched.
 
 For example, imagine you have the following folder structure:
 
@@ -44,65 +46,10 @@ Here is the content of `include_me.md`:
 
 Check out this cool image:
 
-![my image](./content/images/image.png)
+![my image](content/images/image.png)
 ```
 
-So the link is updated to the correct path to the file.
-
-### Update Header Level
-
-> [!NOTE]
-> This feature is not yet implemented, but is planned.
-
-When including an external markdown, we update the heading level to match the relative heading level where the markdown is included.
-
-For example, imagine you have the following folder structure:
-
-```text
-my_project/
-├─ README.md
-├─ install.md
-```
-
-In `README.md` you have:
-
-```md
-# My Cool Project
-
-My project is really cool.
-
-## Installation Instructions
-
-{{#mdinclude ./install.md}}
-```
-
-In `install.md` you have:
-
-```md
-Here are the instructions to install this project:
-
-## MacOS
-
-To install this on mac...
-```
-
-The final output will be:
-
-```md
-# My Cool Project
-
-My project is really cool.
-
-## Installation Instructions
-
-Here are the instructions to install this project:
-
-### MacOS
-
-To install this on mac...
-```
-
-So as you can see, it introduces an additional heading level to the `MacOS` header.
+The link is updated to the correct path relative to the including file.
 
 ## Installation & Setup
 

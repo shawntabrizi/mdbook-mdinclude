@@ -1,19 +1,23 @@
 [package]
 name = "mdbook-mdinclude"
 description = "An mdBook preprocessor for better markdown file inclusion."
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
+rust-version = "1.80"
 repository = "https://github.com/shawntabrizi/mdbook-mdinclude"
 license = "MIT"
 keywords = ["mdbook", "preprocessor"]
 categories = []
 
 [dependencies]
-anyhow = "1.0.71"
-clap = "2.*"
-env_logger = "^0.11.1"
-log = "^0.4.17"
-mdbook = "^0.4.37"
-once_cell = "1.17.1"
-regex = "1.8.1"
-serde_json = "1.*"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = "0.11"
+log = "0.4"
+mdbook = "0.4.37"
+regex = "1"
+serde_json = "1"
+
+[dev-dependencies]
+serde_json = "1"
+tempfile = "3"
