@@ -40,14 +40,15 @@ static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Regex for matching inline markdown links and images, with optional titles.
 ///
-/// Matches `![alt](path)`, `![alt](path "title")`, `[text](path)`, and
-/// `[text](path "title")`. Titles may use double or single quotes.
+/// Matches `![alt](path)`, `![alt](<path>)`, `![alt](path "title")`,
+/// `[text](path)`, `[text](<path>)`, and `[text](path "title")`.
+/// Angle-bracket destinations allow spaces in the path.
 static MARKDOWN_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
-        !\[(.*?)\]\(([^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)   # image ![alt](path "title")
-        |                                                      # or
-        \[(.*?)\]\(([^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)       # link [text](path "title")
+        !\[(.*?)\]\((<[^>]+>|[^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)   # image
+        |                                                              # or
+        \[(.*?)\]\((<[^>]+>|[^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)       # link
         "#,
     )
     .unwrap()
@@ -256,29 +257,75 @@ fn strip_frontmatter(content: &str) -> String {
     content.to_owned()
 }
 
+/// Detect a fenced code block delimiter on a line.
+///
+/// Returns `Some((char, count))` if the line starts with 3+ backticks or tildes.
+/// The `char` is `b'`'` or `b'~'` and `count` is how many fence characters.
+fn detect_fence(line: &str) -> Option<(u8, usize)> {
+    let trimmed = line.trim_start();
+    let first = *trimmed.as_bytes().first()?;
+    if first != b'`' && first != b'~' {
+        return None;
+    }
+    let count = trimmed.bytes().take_while(|&b| b == first).count();
+    if count >= 3 {
+        Some((first, count))
+    } else {
+        None
+    }
+}
+
+/// Check whether `line` is a valid closing fence for a block opened with
+/// `open_char` repeated `open_count` times. A closing fence must use the
+/// same character, be at least as long, and have no content after it.
+fn is_closing_fence(line: &str, open_char: u8, open_count: usize) -> bool {
+    if let Some((ch, count)) = detect_fence(line) {
+        if ch == open_char && count >= open_count {
+            let trimmed = line.trim_start();
+            return trimmed[count..].trim().is_empty();
+        }
+    }
+    false
+}
+
+/// Update fence tracking state for a line. Returns `true` if `line` is
+/// inside a code block (including fence lines themselves).
+fn update_fence_state(fence: &mut Option<(u8, usize)>, line: &str) -> bool {
+    if let Some((open_char, open_count)) = *fence {
+        if is_closing_fence(line, open_char, open_count) {
+            *fence = None;
+        }
+        true // closing fence line is still "inside" the block
+    } else if let Some(f) = detect_fence(line) {
+        *fence = Some(f);
+        true // opening fence line is "inside" the block
+    } else {
+        false
+    }
+}
+
 /// Find byte ranges in `content` that are inside fenced code blocks or inline
 /// code spans. Matches inside these ranges should not be rewritten.
 fn find_code_ranges(content: &str) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
 
-    // Pass 1: fenced code blocks.
-    let mut in_code_block = false;
+    // Pass 1: fenced code blocks (tracking fence char + count).
+    let mut fence: Option<(u8, usize)> = None;
     let mut block_start = 0;
     let mut offset = 0;
     for line in content.split('\n') {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            if in_code_block {
+        if let Some((open_char, open_count)) = fence {
+            if is_closing_fence(line, open_char, open_count) {
                 ranges.push(block_start..offset + line.len());
-                in_code_block = false;
-            } else {
-                block_start = offset;
-                in_code_block = true;
+                fence = None;
             }
+        } else if let Some(f) = detect_fence(line) {
+            block_start = offset;
+            fence = Some(f);
         }
         offset += line.len() + 1; // +1 for \n
     }
-    if in_code_block {
+    if fence.is_some() {
         ranges.push(block_start..content.len());
     }
 
@@ -326,16 +373,23 @@ fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> St
                 return m.as_str().to_string();
             }
 
-            let (is_image, alt_or_text, link, title) =
-                if let (Some(alt), Some(link)) = (caps.get(1), caps.get(2)) {
+            let (is_image, alt_or_text, raw_url, title) =
+                if let (Some(alt), Some(url)) = (caps.get(1), caps.get(2)) {
                     let title = caps.get(3).map_or("", |m| m.as_str());
-                    (true, alt.as_str(), link.as_str(), title)
-                } else if let (Some(text), Some(link)) = (caps.get(4), caps.get(5)) {
+                    (true, alt.as_str(), url.as_str(), title)
+                } else if let (Some(text), Some(url)) = (caps.get(4), caps.get(5)) {
                     let title = caps.get(6).map_or("", |m| m.as_str());
-                    (false, text.as_str(), link.as_str(), title)
+                    (false, text.as_str(), url.as_str(), title)
                 } else {
                     return m.as_str().to_string();
                 };
+
+            // Strip angle brackets if present, remember for reconstruction.
+            let (link, is_angle) = if raw_url.starts_with('<') && raw_url.ends_with('>') {
+                (&raw_url[1..raw_url.len() - 1], true)
+            } else {
+                (raw_url, false)
+            };
 
             if !is_relative_link(link) {
                 return m.as_str().to_string();
@@ -344,10 +398,16 @@ fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> St
             let new_path = normalize_path(&relative_folder.join(link));
             let updated_link = new_path.display().to_string().replace('\\', "/");
 
-            if is_image {
-                format!("![{alt_or_text}]({updated_link}{title})")
+            let dest = if is_angle {
+                format!("<{updated_link}>")
             } else {
-                format!("[{alt_or_text}]({updated_link}{title})")
+                updated_link
+            };
+
+            if is_image {
+                format!("![{alt_or_text}]({dest}{title})")
+            } else {
+                format!("[{alt_or_text}]({dest}{title})")
             }
         })
         .into_owned();
@@ -416,14 +476,10 @@ fn heading_level(line: &str) -> Option<usize> {
 /// skipping headings inside fenced code blocks.
 fn find_parent_heading_level(content: &str) -> Option<usize> {
     let mut last_heading_level = None;
-    let mut in_code_block = false;
+    let mut fence: Option<(u8, usize)> = None;
 
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_block = !in_code_block;
-        }
-        if !in_code_block {
+        if !update_fence_state(&mut fence, line) {
             if let Some(level) = heading_level(line) {
                 last_heading_level = Some(level);
             }
@@ -440,13 +496,9 @@ fn find_parent_heading_level(content: &str) -> Option<usize> {
 fn adjust_heading_levels(content: &str, parent_level: usize) -> String {
     // Find the minimum heading level, skipping code blocks.
     let mut min_level: Option<usize> = None;
-    let mut in_code_block = false;
+    let mut fence: Option<(u8, usize)> = None;
     for line in content.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_block = !in_code_block;
-        }
-        if !in_code_block {
+        if !update_fence_state(&mut fence, line) {
             if let Some(level) = heading_level(line) {
                 min_level = Some(min_level.map_or(level, |m: usize| m.min(level)));
             }
@@ -464,7 +516,7 @@ fn adjust_heading_levels(content: &str, parent_level: usize) -> String {
     }
 
     let mut out = String::with_capacity(content.len() + 32);
-    let mut in_code_block = false;
+    let mut fence: Option<(u8, usize)> = None;
     let mut first = true;
     for line in content.lines() {
         if !first {
@@ -472,12 +524,9 @@ fn adjust_heading_levels(content: &str, parent_level: usize) -> String {
         }
         first = false;
 
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
-            in_code_block = !in_code_block;
-        }
-        if !in_code_block {
+        if !update_fence_state(&mut fence, line) {
             if let Some(level) = heading_level(line) {
+                let trimmed = line.trim_start();
                 let new_level = ((level as isize + offset).max(1) as usize).min(6);
                 out.push_str(&"#".repeat(new_level));
                 out.push_str(&trimmed[level..]);
@@ -1069,5 +1118,88 @@ mod tests {
         assert_eq!(links.len(), 2, "Expected 2 escaped links, got: {links:?}");
         assert_eq!(links[0].link_text, r"\{{#mdinclude a.md}}");
         assert_eq!(links[1].link_text, r"\{{#mdinclude b.md}}");
+    }
+
+    // --- Regression tests for third audit ---
+
+    #[test]
+    fn mixed_fence_backtick_containing_tildes() {
+        // A backtick fence should not be closed by tildes
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "```md\n~~~\n[link](a.md)\n~~~\n```\n[outside](b.md)\n";
+        let result = update_relative_links(input, path, relative_path);
+        assert!(
+            result.contains("[link](a.md)"),
+            "Link inside fence should be unchanged: {result}"
+        );
+        assert!(
+            result.contains("[outside](content/b.md)"),
+            "Link outside fence should be rewritten: {result}"
+        );
+    }
+
+    #[test]
+    fn four_backtick_fence_containing_triple_backticks() {
+        // A 4-backtick fence should not be closed by 3 backticks
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "````\n```\n[link](a.md)\n```\n````\n[outside](b.md)\n";
+        let result = update_relative_links(input, path, relative_path);
+        assert!(
+            result.contains("[link](a.md)"),
+            "Link inside fence should be unchanged: {result}"
+        );
+        assert!(
+            result.contains("[outside](content/b.md)"),
+            "Link outside fence should be rewritten: {result}"
+        );
+    }
+
+    #[test]
+    fn heading_adjustment_respects_mixed_fences() {
+        // Headings inside a 4-backtick fence should not be adjusted
+        let content = "````\n```\n## Fake\n```\n````\n## Real\n";
+        let result = adjust_heading_levels(content, 1);
+        assert!(
+            result.contains("## Fake"),
+            "Heading inside fence should be unchanged: {result}"
+        );
+        assert!(
+            result.contains("## Real"),
+            "Heading outside should be adjusted: {result}"
+        );
+    }
+
+    #[test]
+    fn angle_bracket_link_rewritten() {
+        // P3: angle-bracket link destinations should be rewritten
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[link](<path with spaces/file.md>)";
+        let expected = "[link](<content/path with spaces/file.md>)";
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn angle_bracket_image_rewritten() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "![alt](<images/my photo.png>)";
+        let expected = "![alt](<content/images/my photo.png>)";
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn angle_bracket_absolute_unchanged() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[link](<https://example.com/page>)";
+        assert_eq!(update_relative_links(input, path, relative_path), input);
     }
 }
