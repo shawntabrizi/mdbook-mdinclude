@@ -27,7 +27,7 @@ const MAX_LINK_NESTED_DEPTH: usize = 10;
 static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r"(?x)              # insignificant whitespace mode
-        \\\{\{\#.*\}\}      # match escaped link
+        \\\{\{\#.*?\}\}     # match escaped link (non-greedy)
         |                   # or
         \{\{\s*             # link opening parens and whitespace
         \#([a-zA-Z0-9_]+)   # link type
@@ -38,17 +38,28 @@ static LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 
-/// Regex for matching all markdown links and images.
+/// Regex for matching inline markdown links and images, with optional titles.
 ///
-/// Matches `![alt](path)` and `[text](path)`. Filtering for relative-only
-/// paths is done in the replacement logic since the regex crate does not
-/// support lookahead.
+/// Matches `![alt](path)`, `![alt](path "title")`, `[text](path)`, and
+/// `[text](path "title")`. Titles may use double or single quotes.
 static MARKDOWN_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
         r#"(?x)
-        !\[(.*?)\]\(([^)\s]+)\)   # image ![alt](path)
-        |                          # or
-        \[(.*?)\]\(([^)\s]+)\)     # link [text](path)
+        !\[(.*?)\]\(([^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)   # image ![alt](path "title")
+        |                                                      # or
+        \[(.*?)\]\(([^)\s]+)(\s+(?:"[^"]*"|'[^']*'))?\)       # link [text](path "title")
+        "#,
+    )
+    .unwrap()
+});
+
+/// Regex for matching reference-style link definitions.
+///
+/// Matches `[label]: url` and `[label]: url "title"` at the start of a line.
+static REF_LINK_DEF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r#"(?xm)
+        ^\[(.*?)\]:\s+(\S+)(\s+(?:"[^"]*"|'[^']*'))?$   # [ref]: url "title"
         "#,
     )
     .unwrap()
@@ -298,32 +309,30 @@ fn find_code_ranges(content: &str) -> Vec<Range<usize>> {
 
 /// Updates relative links in `content` to account for the included file's location.
 ///
-/// For example, if a file at `content/README.md` is included into a chapter at
-/// the book root, a link like `![img](./images/photo.png)` becomes
-/// `![img](content/images/photo.png)`.
-///
-/// Links inside fenced code blocks and inline code spans are left unchanged.
+/// Handles inline links/images (with optional titles) and reference-style link
+/// definitions. Links inside fenced code blocks and inline code spans are left
+/// unchanged.
 fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> String {
     let Ok(relative_folder) = relative_path.strip_prefix(path) else {
         return content.to_owned();
     };
 
+    // Pass 1: rewrite inline links and images.
     let code_ranges = find_code_ranges(content);
-
-    MARKDOWN_LINK_RE
+    let content = MARKDOWN_LINK_RE
         .replace_all(content, |caps: &regex::Captures| {
             let m = caps.get(0).unwrap();
-
-            // Skip matches inside code blocks or inline code.
             if code_ranges.iter().any(|r| r.contains(&m.start())) {
                 return m.as_str().to_string();
             }
 
-            let (is_image, alt_or_text, link) =
+            let (is_image, alt_or_text, link, title) =
                 if let (Some(alt), Some(link)) = (caps.get(1), caps.get(2)) {
-                    (true, alt.as_str(), link.as_str())
-                } else if let (Some(text), Some(link)) = (caps.get(3), caps.get(4)) {
-                    (false, text.as_str(), link.as_str())
+                    let title = caps.get(3).map_or("", |m| m.as_str());
+                    (true, alt.as_str(), link.as_str(), title)
+                } else if let (Some(text), Some(link)) = (caps.get(4), caps.get(5)) {
+                    let title = caps.get(6).map_or("", |m| m.as_str());
+                    (false, text.as_str(), link.as_str(), title)
                 } else {
                     return m.as_str().to_string();
                 };
@@ -336,10 +345,34 @@ fn update_relative_links(content: &str, path: &Path, relative_path: &Path) -> St
             let updated_link = new_path.display().to_string().replace('\\', "/");
 
             if is_image {
-                format!("![{alt_or_text}]({updated_link})")
+                format!("![{alt_or_text}]({updated_link}{title})")
             } else {
-                format!("[{alt_or_text}]({updated_link})")
+                format!("[{alt_or_text}]({updated_link}{title})")
             }
+        })
+        .into_owned();
+
+    // Pass 2: rewrite reference-style link definitions ([label]: url "title").
+    let code_ranges = find_code_ranges(&content);
+    REF_LINK_DEF_RE
+        .replace_all(&content, |caps: &regex::Captures| {
+            let m = caps.get(0).unwrap();
+            if code_ranges.iter().any(|r| r.contains(&m.start())) {
+                return m.as_str().to_string();
+            }
+
+            let label = caps.get(1).unwrap().as_str();
+            let link = caps.get(2).unwrap().as_str();
+            let title = caps.get(3).map_or("", |m| m.as_str());
+
+            if !is_relative_link(link) {
+                return m.as_str().to_string();
+            }
+
+            let new_path = normalize_path(&relative_folder.join(link));
+            let updated_link = new_path.display().to_string().replace('\\', "/");
+
+            format!("[{label}]: {updated_link}{title}")
         })
         .into_owned()
 }
@@ -963,5 +996,78 @@ mod tests {
         // Colons in filenames (valid on Unix/macOS) should be treated as relative
         assert!(is_relative_link("images/foo:bar.png"));
         assert!(is_relative_link("./foo:bar.png"));
+    }
+
+    // --- Regression tests for second audit ---
+
+    #[test]
+    fn update_relative_links_titled_link() {
+        // P2: titled links should be rewritten with title preserved
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = r#"[click here](images/photo.png "A nice photo")"#;
+        let expected = r#"[click here](content/images/photo.png "A nice photo")"#;
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn update_relative_links_titled_image() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = r#"![alt](images/photo.png "A nice photo")"#;
+        let expected = r#"![alt](content/images/photo.png "A nice photo")"#;
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn update_relative_links_single_quoted_title() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[link](images/photo.png 'A nice photo')";
+        let expected = "[link](content/images/photo.png 'A nice photo')";
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn update_relative_links_reference_style() {
+        // P2: reference-style link definitions should be rewritten
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[logo]: images/logo.png\n";
+        let expected = "[logo]: content/images/logo.png\n";
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn update_relative_links_reference_style_with_title() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[logo]: images/logo.png \"Our logo\"\n";
+        let expected = "[logo]: content/images/logo.png \"Our logo\"\n";
+        assert_eq!(update_relative_links(input, path, relative_path), expected);
+    }
+
+    #[test]
+    fn update_relative_links_reference_style_absolute_unchanged() {
+        let path = Path::new("/project/");
+        let relative_path = Path::new("/project/content/");
+
+        let input = "[site]: https://example.com\n";
+        assert_eq!(update_relative_links(input, path, relative_path), input);
+    }
+
+    #[test]
+    fn escaped_includes_not_merged_on_same_line() {
+        // P3: multiple escaped includes on one line should be separate matches
+        let s = r"\{{#mdinclude a.md}} and \{{#mdinclude b.md}}";
+        let links: Vec<_> = find_links(s).collect();
+        assert_eq!(links.len(), 2, "Expected 2 escaped links, got: {links:?}");
+        assert_eq!(links[0].link_text, r"\{{#mdinclude a.md}}");
+        assert_eq!(links[1].link_text, r"\{{#mdinclude b.md}}");
     }
 }

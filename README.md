@@ -122,6 +122,23 @@ Actual content here.
 
 When included with `{{#mdinclude}}`, the frontmatter block is automatically stripped. Only the content after the closing `---` is included. If there is no frontmatter, the file is included as-is.
 
+## Supported Syntax and Known Limitations
+
+Link rewriting covers:
+
+- Inline links: `[text](url)` and `![alt](url)`
+- Titled links: `[text](url "title")` and `![alt](url 'title')`
+- Reference-style definitions: `[label]: url` and `[label]: url "title"`
+- Code awareness: links inside fenced code blocks and inline code spans are intentionally skipped
+
+Not currently supported:
+
+- Autolinks (`<url>`) and raw URLs in text
+- HTML `<a>` / `<img>` tags
+- Nested brackets in link text (e.g., `[[text]](url)`)
+
+If you need full Markdown-aware rewriting, consider pairing this tool with a Markdown AST-based preprocessor.
+
 ## Installation & Setup
 
 This preprocessor can be installed with Cargo:
