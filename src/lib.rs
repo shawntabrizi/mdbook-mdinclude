@@ -56,8 +56,31 @@ static MARKDOWN_LINK_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 /// Returns true if `link` is a relative path (not an absolute URL, absolute
 /// path, fragment reference, or URI scheme like `mailto:`, `tel:`, `data:`, etc.).
+///
+/// A URI scheme is `ALPHA *(ALPHA / DIGIT / "+" / "-" / ".") ":"` per RFC 3986.
+/// Colons that appear *after* the first `/` are part of a filename (legal on
+/// Unix/macOS) and do not indicate a scheme.
 fn is_relative_link(link: &str) -> bool {
-    !link.starts_with('/') && !link.starts_with('#') && !link.contains(':')
+    if link.starts_with('/') || link.starts_with('#') {
+        return false;
+    }
+    if let Some(colon_pos) = link.find(':') {
+        let slash_pos = link.find('/');
+        // A colon before any slash could be a URI scheme.
+        if slash_pos.is_none() || colon_pos < slash_pos.unwrap() {
+            let before_colon = &link[..colon_pos];
+            if !before_colon.is_empty()
+                && before_colon.as_bytes()[0].is_ascii_alphabetic()
+                && before_colon
+                    .bytes()
+                    .skip(1)
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'.' | b'-'))
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// A preprocessor for `{{#mdinclude}}` that acts like `{{#include}}` but updates relative links.
@@ -925,14 +948,20 @@ mod tests {
 
     #[test]
     fn is_relative_link_rejects_non_http_schemes() {
-        // P2: mailto, tel, data, file should not be treated as relative
+        // URI schemes should not be treated as relative
         assert!(!is_relative_link("mailto:user@example.com"));
         assert!(!is_relative_link("tel:+1234567890"));
         assert!(!is_relative_link("data:text/plain;base64,abc"));
         assert!(!is_relative_link("file:///path/to/file"));
+        assert!(!is_relative_link("https://example.com"));
+        assert!(!is_relative_link("http://example.com"));
+        assert!(!is_relative_link("ftp://example.com"));
         // Relative paths should still pass
         assert!(is_relative_link("images/photo.png"));
         assert!(is_relative_link("./images/photo.png"));
         assert!(is_relative_link("../images/photo.png"));
+        // Colons in filenames (valid on Unix/macOS) should be treated as relative
+        assert!(is_relative_link("images/foo:bar.png"));
+        assert!(is_relative_link("./foo:bar.png"));
     }
 }
